@@ -91,8 +91,12 @@ if (-not $Release) {
 $tag = "v$Version"
 Write-Host "Release $tag wird veroeffentlicht..." -ForegroundColor Cyan
 
-gh release view $tag --json tagName 2>$null | Out-Null
-if ($LASTEXITCODE -eq 0) {
+# Bewusst 'release list' statt 'release view': view schreibt bei fehlendem Release auf
+# stderr, was PowerShell 5.1 in einen abbrechenden Fehler verwandelt.
+$existingTags = @(gh release list --json tagName --jq '.[].tagName')
+if ($LASTEXITCODE -ne 0) { throw "Releases konnten nicht abgefragt werden." }
+
+if ($existingTags -contains $tag) {
     gh release upload $tag @assets --clobber
 } else {
     $createArgs = @('release', 'create', $tag) + $assets + @('--title', "CurlGrabber $tag")
