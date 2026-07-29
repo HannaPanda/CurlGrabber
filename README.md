@@ -6,6 +6,17 @@ Zielordner wählen, herunterladen — mit Fortschrittsbalken, Tempo und Restzeit
 Gedacht für Videos hinter kurzlebigen CDN-Links, bei denen der Download nur mit den
 Original-Headern der Browser-Sitzung funktioniert.
 
+## Herunterladen
+
+Fertige Pakete liegen unter [Releases](https://github.com/HannaPanda/CurlGrabber/releases):
+
+| Datei | |
+| --- | --- |
+| `CurlGrabber-vX.Y.Z-win-x64-standalone.zip` | Eine einzelne EXE, läuft sofort. ~100 MB, weil die .NET-Runtime eingebettet ist. |
+| `CurlGrabber-vX.Y.Z-win-x64.zip` | Nur 0,1 MB, setzt aber die [.NET-10-Desktop-Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) voraus. |
+
+Im Zweifel die Standalone-Variante nehmen.
+
 ## Verwendung
 
 1. In Firefox <kbd>F12</kbd> → Reiter **Netzwerkanalyse** → die gewünschte Anfrage suchen
@@ -59,8 +70,12 @@ Voraussetzung ist das .NET-10-SDK.
 .\build.ps1
 ```
 
-Das Ergebnis landet unter `dist\` als ZIP. `-SelfContained` bettet die Runtime ein, `-Release`
-lädt das Paket zusätzlich als GitHub-Release hoch.
+Beide ZIP-Varianten landen unter `dist\`. Mit `-Release` werden sie zusätzlich als
+GitHub-Release hochgeladen; die Versionsnummer stammt aus der `.csproj`.
+
+`PublishSingleFile` kommt bewusst nur bei der Standalone-Variante zum Einsatz — zusammen mit
+`SelfContained=false` bettet das SDK die Runtime trotzdem ein und die EXE wächst auf über
+100 MB, statt die erwarteten 0,2 MB zu bleiben.
 
 ## Einstellungen
 

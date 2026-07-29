@@ -1,24 +1,31 @@
 <#
 .SYNOPSIS
-    Baut CurlGrabber und packt eine ZIP-Datei fuer ein GitHub-Release.
+    Baut CurlGrabber und packt ZIP-Dateien fuer ein GitHub-Release.
+
+.DESCRIPTION
+    Es entstehen zwei Varianten:
+
+      win-x64             klein (~0,2 MB), benoetigt die .NET-10-Desktop-Runtime
+      win-x64-standalone  eine einzelne EXE (~100 MB), laeuft ohne Installation
+
+    Hinweis: PublishSingleFile wird bewusst nur fuer die Standalone-Variante
+    verwendet. Kombiniert man es mit SelfContained=false, bettet das SDK die
+    Runtime trotzdem ein und die Datei waechst auf ueber 100 MB - der
+    framework-abhaengige Build bleibt deshalb mehrdateiig.
 
 .EXAMPLE
     .\build.ps1
-    Framework-abhaengig (kleine EXE, benoetigt die .NET-Desktop-Runtime).
-
-.EXAMPLE
-    .\build.ps1 -SelfContained
-    Alles eingebettet - laeuft ohne installierte .NET-Runtime, aber ~150 MB gross.
+    Baut beide Varianten nach dist\.
 
 .EXAMPLE
     .\build.ps1 -Release
-    Baut und laedt das Ergebnis als GitHub-Release hoch (benoetigt die GitHub CLI).
+    Baut beide Varianten und laedt sie als GitHub-Release hoch (benoetigt die GitHub CLI).
 #>
 [CmdletBinding()]
 param(
-    [switch]$SelfContained,
     [switch]$Release,
-    [string]$Version
+    [string]$Version,
+    [string]$Notes
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,51 +35,69 @@ $outDir = Join-Path $root 'dist'
 
 if (-not $Version) {
     $csproj = [xml](Get-Content $project)
-    $Version = $csproj.Project.PropertyGroup.Version | Select-Object -First 1
+    $Version = ($csproj.Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1)
 }
 
-$suffix = if ($SelfContained) { 'win-x64-standalone' } else { 'win-x64' }
-$publishDir = Join-Path $outDir "publish-$suffix"
-$zipPath = Join-Path $outDir "CurlGrabber-v$Version-$suffix.zip"
-
-Write-Host "CurlGrabber $Version -> $suffix" -ForegroundColor Cyan
-
-if (Test-Path $publishDir) { Remove-Item $publishDir -Recurse -Force }
+Write-Host "CurlGrabber $Version" -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
-$publishArgs = @(
-    'publish', $project,
-    '-c', 'Release',
-    '-r', 'win-x64',
-    '-o', $publishDir,
-    '--nologo',
-    "-p:PublishSingleFile=true",
-    "-p:DebugType=none",
-    "-p:Version=$Version"
+function Build-Variant {
+    param([string]$Suffix, [bool]$Standalone)
+
+    $publishDir = Join-Path $outDir "publish-$Suffix"
+    $zipPath = Join-Path $outDir "CurlGrabber-v$Version-$Suffix.zip"
+
+    if (Test-Path $publishDir) { Remove-Item $publishDir -Recurse -Force }
+
+    $publishArgs = @(
+        'publish', $project,
+        '-c', 'Release',
+        '-r', 'win-x64',
+        '-o', $publishDir,
+        '--nologo',
+        '-p:DebugType=none',
+        "-p:Version=$Version"
+    )
+
+    if ($Standalone) {
+        $publishArgs += @('--self-contained', 'true', '-p:PublishSingleFile=true')
+    } else {
+        $publishArgs += @('--self-contained', 'false')
+    }
+
+    dotnet @publishArgs | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "dotnet publish ($Suffix) ist fehlgeschlagen." }
+
+    Get-ChildItem $publishDir -Filter *.pdb -Recurse | Remove-Item -Force
+
+    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+    Compress-Archive -Path (Join-Path $publishDir '*') -DestinationPath $zipPath
+
+    $size = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
+    Write-Host ("  {0,-20} {1,8} MB" -f $Suffix, $size) -ForegroundColor Green
+    return $zipPath
+}
+
+$assets = @(
+    (Build-Variant -Suffix 'win-x64' -Standalone $false)
+    (Build-Variant -Suffix 'win-x64-standalone' -Standalone $true)
 )
-$publishArgs += if ($SelfContained) { '--self-contained', 'true' } else { '--self-contained', 'false' }
 
-dotnet @publishArgs
-if ($LASTEXITCODE -ne 0) { throw "dotnet publish ist fehlgeschlagen." }
-
-Get-ChildItem $publishDir -Filter *.pdb | Remove-Item -Force
-
-if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-Compress-Archive -Path (Join-Path $publishDir '*') -DestinationPath $zipPath
-
-$size = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
-Write-Host "Fertig: $zipPath ($size MB)" -ForegroundColor Green
-
-if (-not $Release) { return }
+if (-not $Release) {
+    Write-Host "Pakete liegen in $outDir" -ForegroundColor Cyan
+    return
+}
 
 $tag = "v$Version"
 Write-Host "Release $tag wird veroeffentlicht..." -ForegroundColor Cyan
 
-$existing = gh release view $tag --json tagName 2>$null
+gh release view $tag --json tagName 2>$null | Out-Null
 if ($LASTEXITCODE -eq 0) {
-    gh release upload $tag $zipPath --clobber
+    gh release upload $tag @assets --clobber
 } else {
-    gh release create $tag $zipPath --title "CurlGrabber $tag" --generate-notes
+    $createArgs = @('release', 'create', $tag) + $assets + @('--title', "CurlGrabber $tag")
+    if ($Notes) { $createArgs += @('--notes', $Notes) } else { $createArgs += '--generate-notes' }
+    gh @createArgs
 }
 if ($LASTEXITCODE -ne 0) { throw "Das GitHub-Release ist fehlgeschlagen." }
 
