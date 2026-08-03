@@ -16,6 +16,9 @@ public sealed class ParsedCurlCommand
 
     /// <summary>Die entfernte Range-Angabe, falls der Befehl eine enthielt.</summary>
     public string? RemovedRange { get; set; }
+
+    /// <summary>Die entfernte Accept-Encoding-Angabe, falls der Befehl eine enthielt.</summary>
+    public string? RemovedEncoding { get; set; }
 }
 
 /// <summary>
@@ -148,9 +151,15 @@ public static class CurlCommandParser
 
                     if (name is "-H" or "--header")
                     {
-                        if (IsRangeHeader(value, out string rangeValue))
+                        if (IsHeader(value, "Range", out string rangeValue))
                         {
                             NoteRemovedRange(result, rangeValue);
+                            continue;
+                        }
+
+                        if (IsHeader(value, "Accept-Encoding", out string encodingValue))
+                        {
+                            NoteRemovedEncoding(result, encodingValue);
                             continue;
                         }
 
@@ -190,19 +199,34 @@ public static class CurlCommandParser
         return result;
     }
 
-    /// <summary>Prueft, ob ein -H-Wert der Range-Header ist, und liefert dessen Wert.</summary>
-    private static bool IsRangeHeader(string header, out string value)
+    /// <summary>Prueft, ob ein -H-Wert der genannte Header ist, und liefert dessen Wert.</summary>
+    private static bool IsHeader(string header, string name, out string value)
     {
         value = string.Empty;
         int colon = header.IndexOf(':');
         if (colon < 0
-            || !header[..colon].Trim().Equals("Range", StringComparison.OrdinalIgnoreCase))
+            || !header[..colon].Trim().Equals(name, StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
 
         value = header[(colon + 1)..].Trim();
         return true;
+    }
+
+    /// <summary>
+    /// Firefox verspricht dem Server, was der Browser entpacken kann - typisch
+    /// "gzip, deflate, br, zstd". Das mit Windows ausgelieferte curl kann nur gzip und deflate;
+    /// antwortet der Server daraufhin in brotli oder zstd, bricht curl mit Code 61 ab, ohne dass
+    /// ein einziges Byte brauchbar ankommt. Mit --compressed fordert curl von sich aus genau die
+    /// Verfahren an, die es auch wieder auspacken kann.
+    /// </summary>
+    private static void NoteRemovedEncoding(ParsedCurlCommand result, string value)
+    {
+        result.RemovedEncoding ??= value;
+        result.Warnings.Add(
+            $"Accept-Encoding entfernt ({value}) - curl handelt die Komprimierung selbst aus. "
+            + "Der Browser beherrscht mehr Verfahren als curl.");
     }
 
     /// <summary>

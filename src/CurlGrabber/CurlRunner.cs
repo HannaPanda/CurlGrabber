@@ -139,6 +139,8 @@ public sealed class CurlRunner
         52 => "Der Server hat nichts zurueckgeliefert.",
         56 => "Fehler beim Empfangen der Daten.",
         60 => "Zertifikat konnte nicht geprueft werden.",
+        61 => "Der Server hat in einem Verfahren komprimiert, das curl nicht auspacken kann "
+              + "(meist brotli oder zstd aus einem mitkopierten Accept-Encoding-Header).",
         _ => $"curl wurde mit Code {code} beendet.",
     };
 }

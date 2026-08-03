@@ -10,9 +10,9 @@
     <RootNamespace>CurlGrabber</RootNamespace>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationDefaultFont>Segoe UI, 9pt</ApplicationDefaultFont>
-    <Version>1.5.0</Version>
-    <AssemblyVersion>1.5.0.0</AssemblyVersion>
-    <FileVersion>1.5.0.0</FileVersion>
+    <Version>1.5.1</Version>
+    <AssemblyVersion>1.5.1.0</AssemblyVersion>
+    <FileVersion>1.5.1.0</FileVersion>
     <Product>CurlGrabber</Product>
     <Company>HannaPanda</Company>
     <Description>GUI-Frontend fuer curl.exe: Firefox-cURL einfuegen, Ziel waehlen, Download mit Fortschrittsanzeige.</Description>

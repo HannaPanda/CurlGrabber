@@ -58,6 +58,13 @@ ein paar Kilobyte großes Stück an; einige CDNs antworten dabei mit `200` statt
 curl die Kürzung nicht bemerkt und die Teildatei als fertigen Download meldet. Was entfernt
 wurde, steht neben den Buttons und noch einmal im Log.
 
+Ebenso fliegt `Accept-Encoding` raus. Firefox verspricht dem Server dort, was der *Browser*
+auspacken kann — typisch `gzip, deflate, br, zstd`. Das mit Windows ausgelieferte curl kann davon
+nur gzip und deflate (`curl -V` zeigt `libz`, aber kein brotli und kein zstd). Antwortet der
+Server daraufhin in zstd, bricht curl mit **Code 61** ab, und zwar bei null nutzbaren Bytes. Ohne
+den Header handelt curl die Komprimierung selbst aus und fordert nur an, was es auch wieder
+auspacken kann.
+
 Aufgerufen wird anschließend das mit Windows ausgelieferte `C:\Windows\System32\curl.exe` — jedes
 Argument einzeln über `ProcessStartInfo.ArgumentList`, ohne Umweg über `cmd.exe`. Dadurch gibt es
 keine Escaping-Probleme, egal welche Sonderzeichen in den Headern stehen.
@@ -201,6 +208,10 @@ ausgewertet; die Restzeit rechnet CurlGrabber selbst aus.
 
 **Exitcode 22** — der Server hat mit 403 oder 404 geantwortet. Bei CDN-Links ist fast immer der
 Token in der URL abgelaufen; einfach den cURL-Befehl in Firefox neu kopieren.
+
+**Exitcode 61** — der Server hat in einem Verfahren komprimiert, das curl nicht auspacken kann.
+Seit 1.5.1 entfernt CurlGrabber den `Accept-Encoding`-Header, der das auslöst; tritt der Fehler
+trotzdem auf, steht die Kodierung in der Antwort des Servers.
 
 **Exitcode 33 oder 36** — der Server unterstützt kein Fortsetzen. Option *Fortsetzen* abschalten
 und neu starten.

@@ -313,7 +313,8 @@ public sealed class MainForm : Form
         _lblParseInfo.Text = parsed.Url.Length == 0
             ? "Keine URL erkannt."
             : $"{parsed.HeaderCount} Header · {Host(parsed.Url)}"
-              + (parsed.RemovedRange is null ? string.Empty : "  ·  Range-Angabe entfernt");
+              + (parsed.RemovedRange is null ? string.Empty : "  ·  Range-Angabe entfernt")
+              + (parsed.RemovedEncoding is null ? string.Empty : "  ·  Accept-Encoding entfernt");
         _lblParseInfo.ForeColor = parsed.Url.Length == 0 ? Color.Firebrick : SystemColors.GrayText;
 
         if (parsed.Url == _lastParsedUrl)
