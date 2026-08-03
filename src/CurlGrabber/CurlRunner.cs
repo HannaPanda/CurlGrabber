@@ -98,8 +98,8 @@ public sealed class CurlRunner
         try
         {
             await Task.WhenAll(
-                PumpAsync(process.StandardError, onLine),
-                PumpAsync(process.StandardOutput, onLine)).ConfigureAwait(false);
+                ProcessOutput.PumpAsync(process.StandardError, onLine),
+                ProcessOutput.PumpAsync(process.StandardOutput, onLine)).ConfigureAwait(false);
 
             await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
         }
@@ -115,47 +115,6 @@ public sealed class CurlRunner
             Canceled = canceled,
             Description = DescribeExitCode(exitCode),
         };
-    }
-
-    /// <summary>
-    /// Liest einen Ausgabestrom zeichenweise. curl trennt die Fortschrittszeilen mit
-    /// Wagenruecklauf statt Zeilenumbruch, deshalb funktioniert ReadLine() hier nicht.
-    /// </summary>
-    private static async Task PumpAsync(StreamReader reader, Action<string> onLine)
-    {
-        var buffer = new char[4096];
-        var line = new StringBuilder();
-
-        while (true)
-        {
-            int read = await reader.ReadAsync(buffer.AsMemory()).ConfigureAwait(false);
-            if (read == 0)
-            {
-                break;
-            }
-
-            for (int i = 0; i < read; i++)
-            {
-                char c = buffer[i];
-                if (c is '\r' or '\n')
-                {
-                    if (line.Length > 0)
-                    {
-                        onLine(line.ToString());
-                        line.Clear();
-                    }
-                }
-                else
-                {
-                    line.Append(c);
-                }
-            }
-        }
-
-        if (line.Length > 0)
-        {
-            onLine(line.ToString());
-        }
     }
 
     public static string DescribeExitCode(int code) => code switch

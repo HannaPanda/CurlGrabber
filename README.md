@@ -38,6 +38,7 @@ Beide Varianten aus dem Firefox-Menü funktionieren: *Als cURL kopieren (Windows
 | Bei HTTP-Fehler abbrechen (`--fail`) | Verhindert, dass eine Fehlerseite als Videodatei gespeichert wird |
 | Vorgetäuschten Datei-Anfang entfernen | Schneidet Tarnbytes vor der eigentlichen Nutzlast weg (siehe unten) |
 | In Abschnitten laden | Holt die Datei in mehreren Anfragen, bis nichts Neues mehr kommt (siehe unten) |
+| Danach nach MP4 umpacken | Legt den fertigen Transportstrom verlustfrei in einen MP4-Container (siehe unten) |
 
 Ist die eingefügte URL eine HLS-Playlist, holt CurlGrabber alle darin genannten Stücke und setzt
 sie zusammen — siehe [Playlists](#playlists-hls--m3u8).
@@ -71,7 +72,32 @@ nicht an der Dateiendung — diese Hoster liefern die Playlist gern mit falschem
 Ist es eine Master-Playlist, wird automatisch die Variante mit der höchsten `BANDWIDTH` genommen
 und deren Segmentliste geladen.
 
-Der interessante Fall ist `EXT-X-BYTERANGE`: dann liegen viele Segmente in wenigen großen
+### Getrennte Tonspur
+
+Führt die Master-Playlist den Ton als eigene Spur (`EXT-X-MEDIA:TYPE=AUDIO` mit `URI`), enthält
+die Bild-Variante wirklich nur Bild — für sich genommen ein Stummfilm. CurlGrabber lädt dann beide
+Listen und fügt Bild und Ton hinterher wieder zusammen. Gibt es mehrere Tonspuren, gewinnt die mit
+`DEFAULT=YES`, sonst die erste; Untertitelspuren bleiben liegen.
+
+Das Zusammenfügen erledigt ffmpeg. Fehlt es, bleiben beide Teile als `name.ts` und `name.ton.ts`
+nebeneinander liegen — mit einem deutlichen Hinweis im Log statt eines stummen Films.
+
+### Viele kleine Segmente
+
+Zwei-Sekunden-Segmente sind verbreitet, und dann stehen für einen Spielfilm schnell ein paar
+tausend Einträge in der Liste. Ein curl-Aufruf je Segment kostet dabei mehr Zeit im Prozessstart
+und TLS-Handschlag als in der Übertragung. Deshalb packt CurlGrabber je **24 Segmente in einen
+Aufruf** und lässt curl davon **6 gleichzeitig** holen. Gemessen an zwanzig Segmenten desselben
+Hosters: **3,9 s einzeln, 0,53 s gebündelt**, bei Byte für Byte gleichem Ergebnis.
+
+Angehängt wird trotzdem streng in Playlist-Reihenfolge, unabhängig davon, welche Anfrage zuerst
+fertig war. Gebündelt wird nur, wenn jedes Stück eine ganze Datei ist — sobald Byte-Bereiche im
+Spiel sind, braucht jedes Stück seinen eigenen `Range`-Header, und der gilt in curl für alle URLs
+eines Aufrufs.
+
+### Byte-Bereiche
+
+Der andere interessante Fall ist `EXT-X-BYTERANGE`: dann liegen viele Segmente in wenigen großen
 Dateien und werden nur über Byte-Bereiche angesprochen. CurlGrabber fasst aufeinanderfolgende
 Bereiche derselben Datei wieder zu einem Abruf zusammen. Bei einem gemessenen Beispiel wurden aus
 **1760 Segmenten 26 Abrufe** — statt 1760 Anfragen also 26, weil die Bereiche jeder Datei
@@ -83,7 +109,31 @@ bei Byte 0 beginnen — weiter hinten steht keiner.
 Sind die Segmente verschlüsselt (`EXT-X-KEY` mit einer anderen Methode als `NONE`), bricht
 CurlGrabber ab und sagt das, statt eine unbrauchbare Datei zu hinterlassen.
 
-Als Dateiname wird bei einer `.m3u8`-URL `video.ts` vorgeschlagen.
+Als Dateiname wird bei einer `.m3u8`-URL `video.ts` vorgeschlagen — ebenso bei `.m3u` und `.txt`,
+weil manche Hoster ihre Master-Playlist als `master.txt` ausliefern.
+
+## Nach MP4 umpacken
+
+HLS liefert MPEG-Transportströme. Das ist ein anderer Container als MP4, auch wenn viele Player
+den Unterschied nicht zeigen — sie erkennen den Inhalt und ignorieren die Dateiendung, weshalb ein
+Transportstrom mit `.mp4` im Namen scheinbar problemlos läuft.
+
+Ist die Option an und liegt ffmpeg neben `CurlGrabber.exe` oder im `PATH`, wird der fertige Strom
+anschließend umgepackt:
+
+```
+ffmpeg -i video.ts -map 0:v:0 -map 0:a:0 -c copy -movflags +faststart video.mp4
+```
+
+`-c copy` heißt: Bild und Ton werden Byte für Byte übernommen, es wechselt nur die Verpackung.
+Das dauert Sekunden statt Stunden und verliert nichts. Gemessen an einem zweistündigen Film:
+**3 Sekunden**, dabei 393 MB → 362 MB, weil der TS-Overhead wegfällt — 4 Byte Kopf je 188-Byte-Paket
+plus Programmtabellen und Füllbytes. `+faststart` zieht die Sprungtabelle nach vorne, damit sich
+die Datei sofort abspielen und durchsuchen lässt.
+
+Wird ffmpeg nicht gefunden, bleibt es beim `.ts` und im Log steht, warum. Nur bei getrennter
+Tonspur ist der Schritt keine Kür — dort wird er unabhängig von der Option versucht, weil das Bild
+sonst stumm bliebe.
 
 ## In Abschnitten laden
 

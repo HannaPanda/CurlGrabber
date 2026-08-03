@@ -268,8 +268,11 @@ public static class CurlCommandParser
         segment = PathHelper.SanitizeFileName(segment);
 
         // Hinter einer Playlist steckt das Video, nicht die Liste - der Name soll passen.
+        // .txt steht dabei fuer die Hoster, die ihre Master-Playlist als master.txt ausliefern;
+        // eine echte Textdatei laedt mit diesem Werkzeug ohnehin niemand.
         if (segment.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)
-            || segment.EndsWith(".m3u", StringComparison.OrdinalIgnoreCase))
+            || segment.EndsWith(".m3u", StringComparison.OrdinalIgnoreCase)
+            || segment.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
         {
             return "video.ts";
         }

@@ -54,6 +54,16 @@ public sealed class M3u8Playlist
     /// <summary>Bei einer Master-Playlist: die URL der besten Variante.</summary>
     public string? VariantUrl { get; private set; }
 
+    /// <summary>
+    /// Bei einer Master-Playlist mit getrennter Tonspur: die URL der Ton-Playlist. Dann enthaelt
+    /// die Bild-Variante wirklich nur Bild und muss hinterher wieder mit dem Ton zusammengefuegt
+    /// werden.
+    /// </summary>
+    public string? AudioUrl { get; private set; }
+
+    /// <summary>Sprache oder Name der gewaehlten Tonspur, nur fuers Log.</summary>
+    public string? AudioName { get; private set; }
+
     /// <summary>Gesetzt, wenn die Segmente verschluesselt sind - dann ist hier Schluss.</summary>
     public string? Encryption { get; private set; }
 
@@ -81,6 +91,7 @@ public sealed class M3u8Playlist
         long rangeOffset = -1;
         long bestBandwidth = -1;
         string? pendingVariant = null;
+        bool audioIsDefault = false;
 
         // Ohne @-Angabe schliesst ein Bereich an den vorigen derselben Datei an.
         var nextOffset = new Dictionary<string, long>(StringComparer.Ordinal);
@@ -116,6 +127,29 @@ public sealed class M3u8Playlist
                 {
                     string? bandwidth = AttributeValue(line, "BANDWIDTH");
                     pendingVariant = bandwidth ?? "0";
+                }
+                else if (line.StartsWith("#EXT-X-MEDIA:", StringComparison.Ordinal))
+                {
+                    // Getrennte Spuren. Nur Ton ist hier interessant; Untertitel laesst
+                    // CurlGrabber liegen. Ohne URI steckt die Spur schon im Bild-Strom.
+                    string? type = AttributeValue(line, "TYPE");
+                    string? uri = AttributeValue(line, "URI");
+
+                    if (uri is { Length: > 0 }
+                        && string.Equals(type, "AUDIO", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool isDefault = string.Equals(
+                            AttributeValue(line, "DEFAULT"), "YES", StringComparison.OrdinalIgnoreCase);
+
+                        // Die als DEFAULT gekennzeichnete Spur gewinnt, sonst die erste.
+                        if (playlist.AudioUrl is null || (isDefault && !audioIsDefault))
+                        {
+                            playlist.AudioUrl = Resolve(playlistUrl, uri);
+                            playlist.AudioName = AttributeValue(line, "NAME")
+                                                 ?? AttributeValue(line, "LANGUAGE");
+                            audioIsDefault = isDefault;
+                        }
+                    }
                 }
 
                 continue;

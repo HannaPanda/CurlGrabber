@@ -11,6 +11,7 @@ public sealed class AppSettings
     public bool FailOnHttpError { get; set; } = true;
     public bool TrimJunkPrefix { get; set; } = true;
     public bool Segmented { get; set; } = true;
+    public bool RemuxToMp4 { get; set; } = true;
     public int WindowWidth { get; set; }
     public int WindowHeight { get; set; }
     public bool Maximized { get; set; }

@@ -21,6 +21,7 @@ public sealed class MainForm : Form
     private readonly CheckBox _chkFail = new();
     private readonly CheckBox _chkTrim = new();
     private readonly CheckBox _chkSegments = new();
+    private readonly CheckBox _chkRemux = new();
     private readonly Button _btnPaste = new();
     private readonly Button _btnClear = new();
     private readonly Button _btnSuggest = new();
@@ -35,6 +36,11 @@ public sealed class MainForm : Form
     private string _lastTargetPath = string.Empty;
     private DateTime _startedAt;
     private string _overallPrefix = string.Empty;
+
+    /// <summary>Gesetzt, wenn die Playlist Bild und Ton getrennt fuehrt.</summary>
+    private string? _separateAudioPath;
+
+    private double _playlistSeconds;
 
     public MainForm()
     {
@@ -60,6 +66,7 @@ public sealed class MainForm : Form
         _chkFail.Checked = _settings.FailOnHttpError;
         _chkTrim.Checked = _settings.TrimJunkPrefix;
         _chkSegments.Checked = _settings.Segmented;
+        _chkRemux.Checked = _settings.RemuxToMp4;
 
         SetStatus("Bereit. cURL-Befehl einfuegen.");
         UpdateParseInfo();
@@ -176,11 +183,13 @@ public sealed class MainForm : Form
         ConfigureCheckBox(_chkFail, "Bei HTTP-Fehler abbrechen (--fail)");
         ConfigureCheckBox(_chkTrim, "Vorgetaeuschten Datei-Anfang entfernen");
         ConfigureCheckBox(_chkSegments, "In Abschnitten laden, bis nichts mehr kommt");
+        ConfigureCheckBox(_chkRemux, "Danach nach MP4 umpacken (ffmpeg, verlustfrei)");
         options.Controls.Add(_chkResume);
         options.Controls.Add(_chkRetry);
         options.Controls.Add(_chkFail);
         options.Controls.Add(_chkTrim);
         options.Controls.Add(_chkSegments);
+        options.Controls.Add(_chkRemux);
         root.Controls.Add(options, 0, 4);
 
         var actions = new FlowLayoutPanel
@@ -499,6 +508,8 @@ public sealed class MainForm : Form
         }
 
         _lastTargetPath = targetPath;
+        _separateAudioPath = null;
+        _playlistSeconds = 0;
         _txtLog.Clear();
         foreach (string warning in parsed.Warnings)
         {
@@ -523,6 +534,7 @@ public sealed class MainForm : Form
         var lineSink = new Progress<string>(HandleCurlLine);
 
         CurlResult result;
+        string finalPath = targetPath;
         try
         {
             if (segmented)
@@ -552,6 +564,12 @@ public sealed class MainForm : Form
                     await TrimJunkPrefixAsync(targetPath);
                 }
             }
+
+            if (result is { ExitCode: 0, Canceled: false })
+            {
+                finalPath = await MaybeRemuxAsync(targetPath);
+                _lastTargetPath = finalPath;
+            }
         }
         catch (OperationCanceledException)
         {
@@ -572,7 +590,7 @@ public sealed class MainForm : Form
             SetBusy(false);
         }
 
-        ReportResult(result, targetPath);
+        ReportResult(result, finalPath);
     }
 
     /// <summary>
@@ -604,26 +622,122 @@ public sealed class MainForm : Form
         string playlistUrl = url;
         var playlist = M3u8Playlist.Parse(M3u8Playlist.ReadText(targetPath), playlistUrl);
 
+        // Die getrennte Tonspur steht in der Master-Playlist und muss ueber den Sprung zur
+        // Bild-Variante hinweg gemerkt werden.
+        string? audioUrl = playlist.AudioUrl;
+        string? audioName = playlist.AudioName;
+
         // Master-Playlist: erst die beste Variante nachladen, die enthaelt die Segmente.
         for (int hop = 0; playlist.VariantUrl is not null && hop < 3; hop++)
         {
             AppendLog("Master-Playlist erkannt, beste Variante: " + playlist.VariantUrl);
             playlistUrl = playlist.VariantUrl;
 
-            var variantArguments = new List<string>(baseArguments) { "-o", targetPath, playlistUrl };
-            var fetched = await _runner.RunAsync(
-                variantArguments,
-                line => ((IProgress<string>)lineSink).Report(line),
-                _cancellation!.Token);
-
+            var fetched = await FetchPlaylistAsync(baseArguments, playlistUrl, targetPath, lineSink);
             if (fetched.Canceled || fetched.ExitCode != 0)
             {
                 return fetched;
             }
 
             playlist = M3u8Playlist.Parse(M3u8Playlist.ReadText(targetPath), playlistUrl);
+            audioUrl ??= playlist.AudioUrl;
+            audioName ??= playlist.AudioName;
         }
 
+        if (Reject(playlist) is { } rejected)
+        {
+            return rejected;
+        }
+
+        var runs = M3u8Playlist.BuildRuns(playlist.Segments);
+        _playlistSeconds = playlist.TotalDuration;
+
+        AppendLog(new string('-', 72));
+        AppendLog($"Playlist erkannt: {playlist.Segments.Count} Segmente, {runs.Count} Abruf(e), "
+                  + $"{TimeSpan.FromSeconds(playlist.TotalDuration):h\\:mm\\:ss} Spielzeit.");
+        if (PlaylistDownloader.CanBatch(runs))
+        {
+            AppendLog($"Gebuendelt: je {PlaylistDownloader.BatchSize} Stuecke pro Aufruf, "
+                      + $"{PlaylistDownloader.ParallelMax} gleichzeitig.");
+        }
+
+        if (audioUrl is not null)
+        {
+            AppendLog($"Ton liegt getrennt vor ({audioName ?? "ohne Namen"}) und wird hinterher "
+                      + "wieder mit dem Bild zusammengefuegt.");
+        }
+
+        var outcome = await RunPlaylistAsync(
+            baseArguments, runs, targetPath, audioUrl is null ? string.Empty : "Bild ", lineSink);
+
+        if (outcome is not PlaylistDownloadResult { Failed: false, Last: { ExitCode: 0, Canceled: false } })
+        {
+            return Unwrap(outcome);
+        }
+
+        if (audioUrl is null)
+        {
+            return outcome.Last;
+        }
+
+        // ------------------------------------------------------------------ Tonspur
+        string audioPlaylistPath = targetPath + ".ton.m3u8";
+        try
+        {
+            var fetched = await FetchPlaylistAsync(baseArguments, audioUrl, audioPlaylistPath, lineSink);
+            if (fetched.Canceled || fetched.ExitCode != 0)
+            {
+                return fetched;
+            }
+
+            var audio = M3u8Playlist.Parse(M3u8Playlist.ReadText(audioPlaylistPath), audioUrl);
+            if (Reject(audio) is { } audioRejected)
+            {
+                return audioRejected;
+            }
+
+            var audioRuns = M3u8Playlist.BuildRuns(audio.Segments);
+            string audioPath = Path.ChangeExtension(targetPath, null) + ".ton.ts";
+
+            AppendLog(new string('-', 72));
+            AppendLog($"Tonspur: {audio.Segments.Count} Segmente, {audioRuns.Count} Abruf(e), "
+                      + $"{TimeSpan.FromSeconds(audio.TotalDuration):h\\:mm\\:ss} Spielzeit.");
+
+            var audioOutcome = await RunPlaylistAsync(
+                baseArguments, audioRuns, audioPath, "Ton ", lineSink);
+
+            if (audioOutcome is not PlaylistDownloadResult
+                { Failed: false, Last: { ExitCode: 0, Canceled: false } })
+            {
+                return Unwrap(audioOutcome);
+            }
+
+            _separateAudioPath = audioPath;
+            return audioOutcome.Last;
+        }
+        finally
+        {
+            TryDelete(audioPlaylistPath);
+        }
+    }
+
+    /// <summary>Laedt eine Playlist-Datei - ohne Fortschrittsanzeige, das sind ein paar Kilobyte.</summary>
+    private async Task<CurlResult> FetchPlaylistAsync(
+        IReadOnlyList<string> baseArguments,
+        string url,
+        string path,
+        Progress<string> lineSink)
+    {
+        var arguments = new List<string>(baseArguments) { "--no-progress-meter", "-o", path, url };
+        return await _runner.RunAsync(
+            arguments,
+            line => ((IProgress<string>)lineSink).Report(line),
+            _cancellation!.Token);
+    }
+
+    /// <summary>Prueft, was CurlGrabber an einer Playlist nicht verarbeiten kann.</summary>
+    private CurlResult? Reject(M3u8Playlist playlist)
+    {
         foreach (string warning in playlist.Warnings)
         {
             AppendLog("Hinweis: " + warning);
@@ -646,15 +760,19 @@ public sealed class MainForm : Form
             return new CurlResult { ExitCode = -1, Description = "Leere Playlist." };
         }
 
-        var runs = M3u8Playlist.BuildRuns(playlist.Segments);
-        var playtime = TimeSpan.FromSeconds(playlist.TotalDuration);
+        return null;
+    }
 
-        AppendLog(new string('-', 72));
-        AppendLog($"Playlist erkannt: {playlist.Segments.Count} Segmente, {runs.Count} Abruf(e), "
-                  + $"{playtime:h\\:mm\\:ss} Spielzeit.");
-
+    private async Task<PlaylistDownloadResult> RunPlaylistAsync(
+        IReadOnlyList<string> baseArguments,
+        IReadOnlyList<DownloadRun> runs,
+        string targetPath,
+        string label,
+        Progress<string> lineSink)
+    {
         var downloader = new PlaylistDownloader(_runner);
         var progressSink = new Progress<string>(AppendLog);
+        var lastLogged = DateTime.MinValue;
 
         var outcome = await downloader.DownloadAsync(
             baseArguments,
@@ -662,30 +780,63 @@ public sealed class MainForm : Form
             targetPath,
             _chkTrim.Checked,
             line => ((IProgress<string>)lineSink).Report(line),
-            (number, count) => _overallPrefix = $"Stueck {number}/{count}  ·  ",
-            (number, added, total) => ((IProgress<string>)progressSink).Report(
-                $"Stueck {number}/{runs.Count}: {PathHelper.FormatBytes(added)}  ·  "
-                + $"insgesamt {PathHelper.FormatBytes(total)}"),
+            (number, count) => _overallPrefix = $"{label}Stueck {number}/{count}  ·  ",
+            (number, added, total) =>
+            {
+                _progress.Style = ProgressBarStyle.Continuous;
+                _progress.Value = (int)Math.Min(100, number * 100L / Math.Max(1, runs.Count));
+                SetStatus($"{label}Stueck {number}/{runs.Count}  ·  "
+                          + $"{PathHelper.FormatBytes(total)} zusammengesetzt");
+
+                // Bei tausenden Segmenten wuerde jede Zeile das Log zumuellen.
+                if (number == runs.Count || DateTime.Now - lastLogged > TimeSpan.FromSeconds(5))
+                {
+                    lastLogged = DateTime.Now;
+                    ((IProgress<string>)progressSink).Report(
+                        $"{label}Stueck {number}/{runs.Count}: {PathHelper.FormatBytes(added)}  ·  "
+                        + $"insgesamt {PathHelper.FormatBytes(total)}");
+                }
+            },
             _cancellation!.Token);
 
         _overallPrefix = string.Empty;
 
-        if (outcome.Failed)
-        {
-            AppendLog("ABBRUCH: " + outcome.FailReason);
-            return new CurlResult
-            {
-                ExitCode = outcome.Last.ExitCode == 0 ? -1 : outcome.Last.ExitCode,
-                Description = outcome.FailReason ?? "Die Playlist konnte nicht geladen werden.",
-            };
-        }
-
-        if (outcome.Last is { ExitCode: 0, Canceled: false })
+        if (!outcome.Failed && outcome.Last is { ExitCode: 0, Canceled: false })
         {
             AppendLog($"{outcome.RunsDone} von {outcome.RunsTotal} Stueck(en) zusammengesetzt.");
         }
 
-        return outcome.Last;
+        return outcome;
+    }
+
+    private CurlResult Unwrap(PlaylistDownloadResult outcome)
+    {
+        if (!outcome.Failed)
+        {
+            return outcome.Last;
+        }
+
+        AppendLog("ABBRUCH: " + outcome.FailReason);
+        return new CurlResult
+        {
+            ExitCode = outcome.Last.ExitCode == 0 ? -1 : outcome.Last.ExitCode,
+            Description = outcome.FailReason ?? "Die Playlist konnte nicht geladen werden.",
+        };
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
+            // Aufraeumen ist kein Grund zu scheitern.
+        }
     }
 
     private static byte[] ReadHead(string path, int count)
@@ -734,6 +885,110 @@ public sealed class MainForm : Form
         }
 
         return outcome.Last;
+    }
+
+    /// <summary>
+    /// Packt den fertigen Transportstrom in einen MP4-Container um und fuegt dabei eine getrennt
+    /// geladene Tonspur wieder ein. Liefert den Pfad, unter dem das Ergebnis am Ende liegt.
+    ///
+    /// Bei getrenntem Ton ist das keine Kuer: ohne diesen Schritt bliebe das Bild stumm. Fehlt
+    /// dann ffmpeg, bleiben beide Teile liegen, statt ein halbes Ergebnis zu melden.
+    /// </summary>
+    private async Task<string> MaybeRemuxAsync(string targetPath)
+    {
+        string? audioPath = _separateAudioPath;
+        bool needed = audioPath is not null;
+
+        if (!needed && (!_chkRemux.Checked || !LooksLikeTransportStream(targetPath)))
+        {
+            return targetPath;
+        }
+
+        string finalPath = Path.ChangeExtension(targetPath, ".mp4");
+        if (string.Equals(finalPath, targetPath, StringComparison.OrdinalIgnoreCase))
+        {
+            // Die Zieldatei heisst schon .mp4 - dann daneben umpacken und danach ersetzen.
+            finalPath = targetPath + ".neu.mp4";
+        }
+
+        AppendLog(new string('-', 72));
+        SetStatus("Wird nach MP4 umgepackt…");
+        _progress.Value = 0;
+
+        var remuxer = new Remuxer();
+        var result = await remuxer.RemuxAsync(
+            targetPath,
+            audioPath,
+            finalPath,
+            AppendLog,
+            seconds =>
+            {
+                if (_playlistSeconds > 0)
+                {
+                    _progress.Value = (int)Math.Clamp(seconds * 100 / _playlistSeconds, 0, 100);
+                }
+
+                SetStatus($"Wird nach MP4 umgepackt…  ·  {TimeSpan.FromSeconds(seconds):h\\:mm\\:ss}"
+                          + (_playlistSeconds > 0
+                              ? $" von {TimeSpan.FromSeconds(_playlistSeconds):h\\:mm\\:ss}"
+                              : string.Empty));
+            },
+            _cancellation!.Token);
+
+        if (!result.Succeeded)
+        {
+            AppendLog(result.ToolMissing
+                ? "Nicht umgepackt: " + result.Message
+                : "Umpacken fehlgeschlagen: " + result.Message);
+
+            if (needed)
+            {
+                AppendLog($"Bild und Ton liegen getrennt: {targetPath} und {audioPath}. "
+                          + "Mit ffmpeg lassen sie sich jederzeit zusammenfuegen.");
+            }
+
+            TryDelete(finalPath);
+            return targetPath;
+        }
+
+        AppendLog($"Verlustfrei nach MP4 umgepackt: {finalPath}");
+        TryDelete(targetPath);
+        if (audioPath is not null)
+        {
+            TryDelete(audioPath);
+        }
+
+        // War das Ziel selbst schon eine .mp4, tritt das Ergebnis an ihre Stelle.
+        if (finalPath.EndsWith(".neu.mp4", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                File.Move(finalPath, targetPath, overwrite: true);
+                return targetPath;
+            }
+            catch (Exception ex)
+            {
+                AppendLog("Umbenennen fehlgeschlagen, das Ergebnis bleibt unter dem Zwischennamen: "
+                          + ex.Message);
+            }
+        }
+
+        return finalPath;
+    }
+
+    /// <summary>Ein MPEG-Transportstrom hat alle 188 Bytes ein 0x47.</summary>
+    private static bool LooksLikeTransportStream(string path)
+    {
+        try
+        {
+            byte[] head = ReadHead(path, 188 * 5);
+            return head.Length == 188 * 5
+                   && head[0] == 0x47 && head[188] == 0x47 && head[376] == 0x47 && head[752] == 0x47;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -943,6 +1198,7 @@ public sealed class MainForm : Form
         _chkFail.Enabled = !busy;
         _chkTrim.Enabled = !busy;
         _chkSegments.Enabled = !busy;
+        _chkRemux.Enabled = !busy;
         UseWaitCursor = false;
     }
 
@@ -987,6 +1243,7 @@ public sealed class MainForm : Form
         _settings.FailOnHttpError = _chkFail.Checked;
         _settings.TrimJunkPrefix = _chkTrim.Checked;
         _settings.Segmented = _chkSegments.Checked;
+        _settings.RemuxToMp4 = _chkRemux.Checked;
         _settings.Maximized = WindowState == FormWindowState.Maximized;
         if (WindowState == FormWindowState.Normal)
         {
