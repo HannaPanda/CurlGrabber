@@ -10,6 +10,7 @@ public sealed class AppSettings
     public bool Retry { get; set; } = true;
     public bool FailOnHttpError { get; set; } = true;
     public bool TrimJunkPrefix { get; set; } = true;
+    public bool Segmented { get; set; } = true;
     public int WindowWidth { get; set; }
     public int WindowHeight { get; set; }
     public bool Maximized { get; set; }

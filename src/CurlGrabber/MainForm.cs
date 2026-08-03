@@ -20,6 +20,7 @@ public sealed class MainForm : Form
     private readonly CheckBox _chkRetry = new();
     private readonly CheckBox _chkFail = new();
     private readonly CheckBox _chkTrim = new();
+    private readonly CheckBox _chkSegments = new();
     private readonly Button _btnPaste = new();
     private readonly Button _btnClear = new();
     private readonly Button _btnSuggest = new();
@@ -57,6 +58,7 @@ public sealed class MainForm : Form
         _chkRetry.Checked = _settings.Retry;
         _chkFail.Checked = _settings.FailOnHttpError;
         _chkTrim.Checked = _settings.TrimJunkPrefix;
+        _chkSegments.Checked = _settings.Segmented;
 
         SetStatus("Bereit. cURL-Befehl einfuegen.");
         UpdateParseInfo();
@@ -172,10 +174,12 @@ public sealed class MainForm : Form
         ConfigureCheckBox(_chkRetry, "Bei Netzwerkfehlern wiederholen (--retry)");
         ConfigureCheckBox(_chkFail, "Bei HTTP-Fehler abbrechen (--fail)");
         ConfigureCheckBox(_chkTrim, "Vorgetaeuschten Datei-Anfang entfernen");
+        ConfigureCheckBox(_chkSegments, "In Abschnitten laden, bis nichts mehr kommt");
         options.Controls.Add(_chkResume);
         options.Controls.Add(_chkRetry);
         options.Controls.Add(_chkFail);
         options.Controls.Add(_chkTrim);
+        options.Controls.Add(_chkSegments);
         root.Controls.Add(options, 0, 4);
 
         var actions = new FlowLayoutPanel
@@ -472,13 +476,17 @@ public sealed class MainForm : Form
             }
         }
 
+        bool segmented = _chkSegments.Checked;
+
         var arguments = new List<string>(parsed.Arguments) { "-L" };
         if (_chkFail.Checked)
         {
             arguments.Add("--fail");
         }
 
-        if (resume)
+        // Im Abschnittsbetrieb uebernimmt die Ueberlappung das Fortsetzen - curls eigenes
+        // -C - wuerde dort mit dem selbst gesetzten Range-Header kollidieren.
+        if (resume && !segmented)
         {
             arguments.Add("-C");
             arguments.Add("-");
@@ -489,10 +497,6 @@ public sealed class MainForm : Form
             arguments.AddRange(["--retry", "5", "--retry-delay", "2", "--retry-all-errors"]);
         }
 
-        arguments.Add("-o");
-        arguments.Add(targetPath);
-        arguments.Add(parsed.Url);
-
         _lastTargetPath = targetPath;
         _txtLog.Clear();
         foreach (string warning in parsed.Warnings)
@@ -500,7 +504,12 @@ public sealed class MainForm : Form
             AppendLog("Hinweis: " + warning);
         }
 
-        AppendLog("curl " + RenderForDisplay(arguments));
+        AppendLog("curl " + RenderForDisplay(arguments) + " -o \"" + targetPath + "\" " + parsed.Url);
+        if (segmented)
+        {
+            AppendLog("Abschnittsbetrieb: weitere Anfragen mit Range-Header, bis nichts Neues mehr kommt.");
+        }
+
         AppendLog(new string('-', 72));
 
         _progress.Style = ProgressBarStyle.Continuous;
@@ -515,10 +524,22 @@ public sealed class MainForm : Form
         CurlResult result;
         try
         {
-            result = await _runner.RunAsync(
-                arguments,
-                line => ((IProgress<string>)lineSink).Report(line),
-                _cancellation.Token);
+            if (segmented)
+            {
+                result = await RunSegmentedAsync(arguments, parsed.Url, targetPath, resume, lineSink);
+            }
+            else
+            {
+                var single = new List<string>(arguments) { "-o", targetPath, parsed.Url };
+                result = await _runner.RunAsync(
+                    single,
+                    line => ((IProgress<string>)lineSink).Report(line),
+                    _cancellation.Token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            result = new CurlResult { Canceled = true, Description = "Abgebrochen." };
         }
         catch (Exception ex)
         {
@@ -542,6 +563,46 @@ public sealed class MainForm : Form
         }
 
         ReportResult(result, targetPath);
+    }
+
+    /// <summary>Laedt die Datei in mehreren Anfragen - siehe <see cref="SegmentedDownloader"/>.</summary>
+    private async Task<CurlResult> RunSegmentedAsync(
+        IReadOnlyList<string> baseArguments,
+        string url,
+        string targetPath,
+        bool resume,
+        Progress<string> lineSink)
+    {
+        var downloader = new SegmentedDownloader(_runner);
+        var chunkSink = new Progress<string>(AppendLog);
+
+        var outcome = await downloader.DownloadAsync(
+            baseArguments,
+            url,
+            targetPath,
+            resume,
+            line => ((IProgress<string>)lineSink).Report(line),
+            (number, added, total) => ((IProgress<string>)chunkSink).Report(
+                $"Abschnitt {number}: +{PathHelper.FormatBytes(added)}  ·  "
+                + $"insgesamt {PathHelper.FormatBytes(total)}"),
+            _cancellation!.Token);
+
+        if (outcome.Stalled)
+        {
+            AppendLog("ABBRUCH: " + outcome.StallReason);
+            return new CurlResult
+            {
+                ExitCode = outcome.Last.ExitCode == 0 ? -1 : outcome.Last.ExitCode,
+                Description = outcome.StallReason ?? "Die Abschnitte passten nicht zusammen.",
+            };
+        }
+
+        if (outcome.Last.ExitCode == 0 && !outcome.Last.Canceled)
+        {
+            AppendLog($"{outcome.Requests} Anfrage(n), {PathHelper.FormatBytes(outcome.TotalBytes)} zusammengesetzt.");
+        }
+
+        return outcome.Last;
     }
 
     /// <summary>
@@ -750,6 +811,7 @@ public sealed class MainForm : Form
         _chkRetry.Enabled = !busy;
         _chkFail.Enabled = !busy;
         _chkTrim.Enabled = !busy;
+        _chkSegments.Enabled = !busy;
         UseWaitCursor = false;
     }
 
@@ -793,6 +855,7 @@ public sealed class MainForm : Form
         _settings.Retry = _chkRetry.Checked;
         _settings.FailOnHttpError = _chkFail.Checked;
         _settings.TrimJunkPrefix = _chkTrim.Checked;
+        _settings.Segmented = _chkSegments.Checked;
         _settings.Maximized = WindowState == FormWindowState.Maximized;
         if (WindowState == FormWindowState.Normal)
         {

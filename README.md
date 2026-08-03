@@ -37,6 +37,7 @@ Beide Varianten aus dem Firefox-Menü funktionieren: *Als cURL kopieren (Windows
 | Wiederholen (`--retry`) | 5 Versuche mit 2 s Pause bei Netzwerkfehlern |
 | Bei HTTP-Fehler abbrechen (`--fail`) | Verhindert, dass eine Fehlerseite als Videodatei gespeichert wird |
 | Vorgetäuschten Datei-Anfang entfernen | Schneidet Tarnbytes vor der eigentlichen Nutzlast weg (siehe unten) |
+| In Abschnitten laden | Holt die Datei in mehreren Anfragen, bis nichts Neues mehr kommt (siehe unten) |
 
 Ist die Zieldatei bereits vorhanden, fragt CurlGrabber nach: neu herunterladen oder fortsetzen.
 
@@ -56,6 +57,34 @@ wurde, steht neben den Buttons und noch einmal im Log.
 Aufgerufen wird anschließend das mit Windows ausgelieferte `C:\Windows\System32\curl.exe` — jedes
 Argument einzeln über `ProcessStartInfo.ArgumentList`, ohne Umweg über `cmd.exe`. Dadurch gibt es
 keine Escaping-Probleme, egal welche Sonderzeichen in den Headern stehen.
+
+## In Abschnitten laden
+
+Manche Hoster geben pro Antwort nur eine begrenzte Menge heraus. Weil sie dabei mit `200 OK`
+antworten statt mit `206` und keinen `Content-Range` mitschicken, merkt curl davon nichts und
+meldet einen erfolgreichen Download — die Datei ist aber stillschweigend abgeschnitten.
+
+Ist die Option an, stellt CurlGrabber nach dem ersten Durchgang weitere Anfragen mit
+`Range: bytes=…-`, bis ein Abschnitt nichts Neues mehr bringt. Die erste Anfrage bleibt bewusst
+ohne `Range`, damit sich der Server genauso verhält wie beim Abspielen im Browser.
+
+Zusammengesetzt wird **nicht nach Byte-Positionen, sondern über die Überlappung**: jede Anfrage
+setzt 64 KiB vor dem bereits Vorhandenen an, und der neue Abschnitt wird dort angesetzt, wo sich
+die letzten 4 KiB der vorhandenen Daten in ihm wiederfinden. Das ist nötig, weil Server den
+angeforderten Start nicht zwingend einhalten — bei dem hier untersuchten CDN beginnt jede
+Antwort 39 Bytes hinter dem angeforderten Offset. Nach Byte-Positionen aneinandergehängt fehlten
+genau diese 39 Bytes an jeder Abschnittsgrenze.
+
+Das Suchmuster ist absichtlich viel kürzer als die Rückgriffweite: beginnt der Server *später*
+als angefordert, liegt der Anfang der Überlappung gar nicht im Abschnitt, und ein Muster über die
+volle Überlappung wäre nicht mehr auffindbar. Schließt ein Abschnitt gar nicht an, bricht
+CurlGrabber ab, statt eine falsch zusammengesetzte Datei zu hinterlassen.
+
+Nebenbei ersetzt das auch das Fortsetzen: eine angefangene Datei wird über dieselbe Überlappung
+weitergeführt, deshalb entfällt `-C -`, solange die Option an ist.
+
+Bei einem Server ohne Deckel kostet das genau eine zusätzliche Anfrage, die dann nichts Neues
+mehr liefert.
 
 ## Vorgetäuschter Datei-Anfang
 
