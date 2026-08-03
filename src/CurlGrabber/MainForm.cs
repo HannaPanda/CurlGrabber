@@ -34,6 +34,7 @@ public sealed class MainForm : Form
     private string _lastParsedUrl = string.Empty;
     private string _lastTargetPath = string.Empty;
     private DateTime _startedAt;
+    private string _overallPrefix = string.Empty;
 
     public MainForm()
     {
@@ -536,6 +537,21 @@ public sealed class MainForm : Form
                     line => ((IProgress<string>)lineSink).Report(line),
                     _cancellation.Token);
             }
+
+            if (result is { ExitCode: 0, Canceled: false })
+            {
+                // Hinter der URL kann statt der Datei eine Playlist stecken - dann ist das eben
+                // Geladene nur die Wegbeschreibung und das Video liegt anderswo.
+                var viaPlaylist = await TryPlaylistAsync(arguments, parsed.Url, targetPath, lineSink);
+                if (viaPlaylist is not null)
+                {
+                    result = viaPlaylist;
+                }
+                else if (_chkTrim.Checked)
+                {
+                    await TrimJunkPrefixAsync(targetPath);
+                }
+            }
         }
         catch (OperationCanceledException)
         {
@@ -543,26 +559,141 @@ public sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            SetBusy(false);
             AppendLog("FEHLER: " + ex.Message);
-            SetStatus("curl konnte nicht gestartet werden.");
-            ShowError("curl konnte nicht gestartet werden:\n" + ex.Message);
+            SetStatus("Der Download ist gescheitert.");
+            ShowError("Der Download ist gescheitert:\n" + ex.Message);
             return;
         }
         finally
         {
-            _cancellation.Dispose();
+            _overallPrefix = string.Empty;
+            _cancellation?.Dispose();
             _cancellation = null;
-        }
-
-        SetBusy(false);
-
-        if (result is { ExitCode: 0, Canceled: false } && _chkTrim.Checked)
-        {
-            await TrimJunkPrefixAsync(targetPath);
+            SetBusy(false);
         }
 
         ReportResult(result, targetPath);
+    }
+
+    /// <summary>
+    /// Prueft, ob die geladene Datei eine HLS-Playlist ist, und holt in dem Fall alles, was
+    /// darin steht. Liefert null, wenn es keine Playlist war - dann bleibt es beim normalen
+    /// Download.
+    /// </summary>
+    private async Task<CurlResult?> TryPlaylistAsync(
+        IReadOnlyList<string> baseArguments,
+        string url,
+        string targetPath,
+        Progress<string> lineSink)
+    {
+        // Eine Playlist ist ein Textschnipsel. Alles Groessere ist das Video selbst und wird
+        // gar nicht erst darauf untersucht.
+        const long maxPlaylistBytes = 8 * 1024 * 1024;
+
+        var info = new FileInfo(targetPath);
+        if (!info.Exists || info.Length == 0 || info.Length > maxPlaylistBytes)
+        {
+            return null;
+        }
+
+        if (!M3u8Playlist.LooksLikePlaylist(ReadHead(targetPath, 16)))
+        {
+            return null;
+        }
+
+        string playlistUrl = url;
+        var playlist = M3u8Playlist.Parse(M3u8Playlist.ReadText(targetPath), playlistUrl);
+
+        // Master-Playlist: erst die beste Variante nachladen, die enthaelt die Segmente.
+        for (int hop = 0; playlist.VariantUrl is not null && hop < 3; hop++)
+        {
+            AppendLog("Master-Playlist erkannt, beste Variante: " + playlist.VariantUrl);
+            playlistUrl = playlist.VariantUrl;
+
+            var variantArguments = new List<string>(baseArguments) { "-o", targetPath, playlistUrl };
+            var fetched = await _runner.RunAsync(
+                variantArguments,
+                line => ((IProgress<string>)lineSink).Report(line),
+                _cancellation!.Token);
+
+            if (fetched.Canceled || fetched.ExitCode != 0)
+            {
+                return fetched;
+            }
+
+            playlist = M3u8Playlist.Parse(M3u8Playlist.ReadText(targetPath), playlistUrl);
+        }
+
+        foreach (string warning in playlist.Warnings)
+        {
+            AppendLog("Hinweis: " + warning);
+        }
+
+        if (playlist.Encryption is not null)
+        {
+            AppendLog($"ABBRUCH: Die Segmente sind verschluesselt ({playlist.Encryption}). "
+                      + "CurlGrabber kann sie nicht entschluesseln.");
+            return new CurlResult
+            {
+                ExitCode = -1,
+                Description = $"Die Playlist ist verschluesselt ({playlist.Encryption}).",
+            };
+        }
+
+        if (playlist.Segments.Count == 0)
+        {
+            AppendLog("ABBRUCH: In der Playlist standen keine Segmente.");
+            return new CurlResult { ExitCode = -1, Description = "Leere Playlist." };
+        }
+
+        var runs = M3u8Playlist.BuildRuns(playlist.Segments);
+        var playtime = TimeSpan.FromSeconds(playlist.TotalDuration);
+
+        AppendLog(new string('-', 72));
+        AppendLog($"Playlist erkannt: {playlist.Segments.Count} Segmente, {runs.Count} Abruf(e), "
+                  + $"{playtime:h\\:mm\\:ss} Spielzeit.");
+
+        var downloader = new PlaylistDownloader(_runner);
+        var progressSink = new Progress<string>(AppendLog);
+
+        var outcome = await downloader.DownloadAsync(
+            baseArguments,
+            runs,
+            targetPath,
+            _chkTrim.Checked,
+            line => ((IProgress<string>)lineSink).Report(line),
+            (number, count) => _overallPrefix = $"Stueck {number}/{count}  ·  ",
+            (number, added, total) => ((IProgress<string>)progressSink).Report(
+                $"Stueck {number}/{runs.Count}: {PathHelper.FormatBytes(added)}  ·  "
+                + $"insgesamt {PathHelper.FormatBytes(total)}"),
+            _cancellation!.Token);
+
+        _overallPrefix = string.Empty;
+
+        if (outcome.Failed)
+        {
+            AppendLog("ABBRUCH: " + outcome.FailReason);
+            return new CurlResult
+            {
+                ExitCode = outcome.Last.ExitCode == 0 ? -1 : outcome.Last.ExitCode,
+                Description = outcome.FailReason ?? "Die Playlist konnte nicht geladen werden.",
+            };
+        }
+
+        if (outcome.Last is { ExitCode: 0, Canceled: false })
+        {
+            AppendLog($"{outcome.RunsDone} von {outcome.RunsTotal} Stueck(en) zusammengesetzt.");
+        }
+
+        return outcome.Last;
+    }
+
+    private static byte[] ReadHead(string path, int count)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        var buffer = new byte[(int)Math.Min(count, stream.Length)];
+        stream.ReadExactly(buffer, 0, buffer.Length);
+        return buffer;
     }
 
     /// <summary>Laedt die Datei in mehreren Anfragen - siehe <see cref="SegmentedDownloader"/>.</summary>
@@ -655,7 +786,7 @@ public sealed class MainForm : Form
                 _progress.Value = progress.Percent;
             }
 
-            SetStatus(FormatProgress(progress));
+            SetStatus(_overallPrefix + FormatProgress(progress));
             return;
         }
 

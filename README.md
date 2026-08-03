@@ -39,6 +39,9 @@ Beide Varianten aus dem Firefox-Menü funktionieren: *Als cURL kopieren (Windows
 | Vorgetäuschten Datei-Anfang entfernen | Schneidet Tarnbytes vor der eigentlichen Nutzlast weg (siehe unten) |
 | In Abschnitten laden | Holt die Datei in mehreren Anfragen, bis nichts Neues mehr kommt (siehe unten) |
 
+Ist die eingefügte URL eine HLS-Playlist, holt CurlGrabber alle darin genannten Stücke und setzt
+sie zusammen — siehe [Playlists](#playlists-hls--m3u8).
+
 Ist die Zieldatei bereits vorhanden, fragt CurlGrabber nach: neu herunterladen oder fortsetzen.
 
 ## Wie es arbeitet
@@ -57,6 +60,30 @@ wurde, steht neben den Buttons und noch einmal im Log.
 Aufgerufen wird anschließend das mit Windows ausgelieferte `C:\Windows\System32\curl.exe` — jedes
 Argument einzeln über `ProcessStartInfo.ArgumentList`, ohne Umweg über `cmd.exe`. Dadurch gibt es
 keine Escaping-Probleme, egal welche Sonderzeichen in den Headern stehen.
+
+## Playlists (HLS / m3u8)
+
+Steckt hinter der URL keine Videodatei, sondern eine `#EXTM3U`-Playlist, lädt CurlGrabber alles
+nach, was darin steht, und setzt es in Playlist-Reihenfolge zusammen. Erkannt wird das am Inhalt,
+nicht an der Dateiendung — diese Hoster liefern die Playlist gern mit falschem Content-Type aus
+(gesehen: `image/jpeg`).
+
+Ist es eine Master-Playlist, wird automatisch die Variante mit der höchsten `BANDWIDTH` genommen
+und deren Segmentliste geladen.
+
+Der interessante Fall ist `EXT-X-BYTERANGE`: dann liegen viele Segmente in wenigen großen
+Dateien und werden nur über Byte-Bereiche angesprochen. CurlGrabber fasst aufeinanderfolgende
+Bereiche derselben Datei wieder zu einem Abruf zusammen. Bei einem gemessenen Beispiel wurden aus
+**1760 Segmenten 26 Abrufe** — statt 1760 Anfragen also 26, weil die Bereiche jeder Datei
+lückenlos aneinander anschließen. Gibt es echte Lücken, bleiben es entsprechend mehrere Abrufe.
+
+Der vorgetäuschte Datei-Anfang wird dabei je Datei einmal entfernt, und zwar nur bei Abrufen, die
+bei Byte 0 beginnen — weiter hinten steht keiner.
+
+Sind die Segmente verschlüsselt (`EXT-X-KEY` mit einer anderen Methode als `NONE`), bricht
+CurlGrabber ab und sagt das, statt eine unbrauchbare Datei zu hinterlassen.
+
+Als Dateiname wird bei einer `.m3u8`-URL `video.ts` vorgeschlagen.
 
 ## In Abschnitten laden
 

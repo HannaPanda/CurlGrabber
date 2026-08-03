@@ -267,6 +267,13 @@ public static class CurlCommandParser
 
         segment = PathHelper.SanitizeFileName(segment);
 
+        // Hinter einer Playlist steckt das Video, nicht die Liste - der Name soll passen.
+        if (segment.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)
+            || segment.EndsWith(".m3u", StringComparison.OrdinalIgnoreCase))
+        {
+            return "video.ts";
+        }
+
         string extension = Path.GetExtension(segment);
         bool usableExtension = extension.Length is >= 2 and <= 6
                                && extension[1..].All(char.IsLetterOrDigit);
