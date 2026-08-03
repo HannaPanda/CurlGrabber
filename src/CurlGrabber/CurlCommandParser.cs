@@ -13,6 +13,9 @@ public sealed class ParsedCurlCommand
     public List<string> Warnings { get; } = new();
 
     public int HeaderCount { get; set; }
+
+    /// <summary>Die entfernte Range-Angabe, falls der Befehl eine enthielt.</summary>
+    public string? RemovedRange { get; set; }
 }
 
 /// <summary>
@@ -137,8 +140,20 @@ public static class CurlCommandParser
                         continue;
                     }
 
+                    if (name is "-r" or "--range")
+                    {
+                        NoteRemovedRange(result, value);
+                        continue;
+                    }
+
                     if (name is "-H" or "--header")
                     {
+                        if (IsRangeHeader(value, out string rangeValue))
+                        {
+                            NoteRemovedRange(result, rangeValue);
+                            continue;
+                        }
+
                         result.HeaderCount++;
                     }
 
@@ -173,6 +188,52 @@ public static class CurlCommandParser
         }
 
         return result;
+    }
+
+    /// <summary>Prueft, ob ein -H-Wert der Range-Header ist, und liefert dessen Wert.</summary>
+    private static bool IsRangeHeader(string header, out string value)
+    {
+        value = string.Empty;
+        int colon = header.IndexOf(':');
+        if (colon < 0
+            || !header[..colon].Trim().Equals("Range", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        value = header[(colon + 1)..].Trim();
+        return true;
+    }
+
+    /// <summary>
+    /// Der Browser fordert bei Videos immer nur den Ausschnitt an, den der Player gerade braucht.
+    /// Uebernaehme CurlGrabber diese Angabe, kaeme statt der Datei nur dieses Stueck an - manche
+    /// CDNs antworten dabei sogar mit 200 statt 206, sodass curl die Kuerzung nicht bemerkt.
+    /// </summary>
+    private static void NoteRemovedRange(ParsedCurlCommand result, string value)
+    {
+        result.RemovedRange ??= value;
+        result.Warnings.Add(
+            $"Range-Angabe entfernt ({DescribeRange(value)}) - es wird die vollstaendige Datei geladen.");
+    }
+
+    /// <summary>Ergaenzt eine Range-Angabe um ihre Groesse, soweit sie sich ausrechnen laesst.</summary>
+    private static string DescribeRange(string value)
+    {
+        string span = value.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase)
+            ? value["bytes=".Length..]
+            : value;
+
+        string[] parts = span.Split('-');
+        if (parts.Length == 2
+            && long.TryParse(parts[0].Trim(), out long from)
+            && long.TryParse(parts[1].Trim(), out long to)
+            && to >= from)
+        {
+            return $"{value} - nur {PathHelper.FormatBytes(to - from + 1)}";
+        }
+
+        return value;
     }
 
     /// <summary>Schlaegt anhand der URL einen Dateinamen vor.</summary>

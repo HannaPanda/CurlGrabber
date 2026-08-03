@@ -45,6 +45,13 @@ Der eingefügte Befehl wird zerlegt statt weitergereicht. URL, alle `-H`-Header,
 Daten werden übernommen; `-o`, `-O`, `-s` und `-#` werden verworfen, weil CurlGrabber Ziel und
 Fortschrittsanzeige selbst steuert.
 
+Auch `Range`-Angaben werden verworfen — sowohl der `-H "Range: bytes=…"`-Header als auch
+`-r`/`--range`. Ein Videoplayer lädt immer nur den Ausschnitt, den er gerade abspielt, und
+genau dieser Ausschnitt steht im kopierten Befehl. Ohne das Entfernen käme statt der Datei nur
+ein paar Kilobyte großes Stück an; einige CDNs antworten dabei mit `200` statt `206`, sodass
+curl die Kürzung nicht bemerkt und die Teildatei als fertigen Download meldet. Was entfernt
+wurde, steht neben den Buttons und noch einmal im Log.
+
 Aufgerufen wird anschließend das mit Windows ausgelieferte `C:\Windows\System32\curl.exe` — jedes
 Argument einzeln über `ProcessStartInfo.ArgumentList`, ohne Umweg über `cmd.exe`. Dadurch gibt es
 keine Escaping-Probleme, egal welche Sonderzeichen in den Headern stehen.
