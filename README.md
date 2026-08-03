@@ -36,6 +36,7 @@ Beide Varianten aus dem Firefox-Menü funktionieren: *Als cURL kopieren (Windows
 | Fortsetzen (`-C -`) | Setzt einen abgebrochenen Download an der vorhandenen Stelle fort |
 | Wiederholen (`--retry`) | 5 Versuche mit 2 s Pause bei Netzwerkfehlern |
 | Bei HTTP-Fehler abbrechen (`--fail`) | Verhindert, dass eine Fehlerseite als Videodatei gespeichert wird |
+| Vorgetäuschten Datei-Anfang entfernen | Schneidet Tarnbytes vor der eigentlichen Nutzlast weg (siehe unten) |
 
 Ist die Zieldatei bereits vorhanden, fragt CurlGrabber nach: neu herunterladen oder fortsetzen.
 
@@ -55,6 +56,35 @@ wurde, steht neben den Buttons und noch einmal im Log.
 Aufgerufen wird anschließend das mit Windows ausgelieferte `C:\Windows\System32\curl.exe` — jedes
 Argument einzeln über `ProcessStartInfo.ArgumentList`, ohne Umweg über `cmd.exe`. Dadurch gibt es
 keine Escaping-Probleme, egal welche Sonderzeichen in den Headern stehen.
+
+## Vorgetäuschter Datei-Anfang
+
+Manche Hoster stellen ihren Video-Segmenten ein paar Bytes voran, die wie ein harmloses Asset
+aussehen — mal ein PNG-Fragment, mal CSS, HTML oder eine WOFF-Signatur —, aufgefüllt bis zu einer
+runden Länge. Die Nutzlast dahinter ist unverändert.
+
+CurlGrabber erkennt nicht die Tarnung, sondern den Beginn der echten Datei: gesucht wird die
+erste Stelle, ab der ein durchgehendes MPEG-TS-Paketraster (0x47 alle 188 Bytes, über 50 Pakete
+geprüft, Paketköpfe auf Plausibilität) oder eine gültige ISO-BMFF-Boxkette (`ftyp`/`styp` mit
+passender Folgebox) steht. Damit ist gleichgültig, was sich der Hoster als Tarnung ausdenkt.
+
+Zwei Fallstricke sind dabei berücksichtigt:
+
+- Das letzte Byte der Tarnung kann zufällig ein `0x47` sein und genau auf dem Paketraster liegen —
+  `GIF89a` fängt zum Beispiel mit dem TS-Sync-Byte an. Der Fundort wäre dann ein Paket zu früh,
+  deshalb wird zusätzlich auf die Programmtabelle (PAT auf PID 0) ausgerichtet, sofern eine in den
+  nächsten acht Paketen steht.
+- Findet sich gar keine bekannte Nutzlast, wird nichts angefasst. Zufallsdaten, echte PNGs,
+  Textdateien und HTML-Fehlerseiten bleiben unverändert.
+
+Geschnitten wird durch Vorschieben innerhalb der Datei, ohne zweite Kopie auf der Platte — bei
+mehreren Gigabyte Video ist das der Unterschied zwischen „geht" und „kein Platz mehr".
+
+Zu beachten: ffmpeg und VLC synchronisieren sich auch mit der Tarnung problemlos neu, der Schnitt
+ist für sie kein Unterschied. Er lohnt für strengere Player, für die Dateityp-Erkennung und fürs
+Weiterverarbeiten.
+
+## Wie die Fortschrittsanzeige arbeitet
 
 Die Fortschrittsanzeige liest curls Statustabelle von stderr. curl trennt diese Zeilen mit
 Wagenrücklauf statt Zeilenumbruch und lässt die Zeitspalten leer, solange die Werte unbekannt

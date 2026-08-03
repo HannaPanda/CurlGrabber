@@ -19,6 +19,7 @@ public sealed class MainForm : Form
     private readonly CheckBox _chkResume = new();
     private readonly CheckBox _chkRetry = new();
     private readonly CheckBox _chkFail = new();
+    private readonly CheckBox _chkTrim = new();
     private readonly Button _btnPaste = new();
     private readonly Button _btnClear = new();
     private readonly Button _btnSuggest = new();
@@ -55,6 +56,7 @@ public sealed class MainForm : Form
         _chkResume.Checked = _settings.Resume;
         _chkRetry.Checked = _settings.Retry;
         _chkFail.Checked = _settings.FailOnHttpError;
+        _chkTrim.Checked = _settings.TrimJunkPrefix;
 
         SetStatus("Bereit. cURL-Befehl einfuegen.");
         UpdateParseInfo();
@@ -169,9 +171,11 @@ public sealed class MainForm : Form
         ConfigureCheckBox(_chkResume, "Abgebrochenen Download fortsetzen (-C -)");
         ConfigureCheckBox(_chkRetry, "Bei Netzwerkfehlern wiederholen (--retry)");
         ConfigureCheckBox(_chkFail, "Bei HTTP-Fehler abbrechen (--fail)");
+        ConfigureCheckBox(_chkTrim, "Vorgetaeuschten Datei-Anfang entfernen");
         options.Controls.Add(_chkResume);
         options.Controls.Add(_chkRetry);
         options.Controls.Add(_chkFail);
+        options.Controls.Add(_chkTrim);
         root.Controls.Add(options, 0, 4);
 
         var actions = new FlowLayoutPanel
@@ -531,7 +535,48 @@ public sealed class MainForm : Form
         }
 
         SetBusy(false);
+
+        if (result is { ExitCode: 0, Canceled: false } && _chkTrim.Checked)
+        {
+            await TrimJunkPrefixAsync(targetPath);
+        }
+
         ReportResult(result, targetPath);
+    }
+
+    /// <summary>
+    /// Schneidet einen vorgetaeuschten Datei-Anfang weg. Gefunden wird er ueber den Beginn der
+    /// echten Nutzlast, nicht ueber die Tarnung - siehe <see cref="PayloadTrimmer"/>.
+    /// </summary>
+    private async Task TrimJunkPrefixAsync(string path)
+    {
+        PayloadScan scan;
+        try
+        {
+            scan = await Task.Run(() => PayloadTrimmer.Scan(path));
+        }
+        catch (Exception ex)
+        {
+            AppendLog("Der Dateianfang konnte nicht geprueft werden: " + ex.Message);
+            return;
+        }
+
+        if (!scan.HasPrefix)
+        {
+            return;
+        }
+
+        SetStatus("Vorgetaeuschter Datei-Anfang wird entfernt…");
+        try
+        {
+            await Task.Run(() => PayloadTrimmer.RemovePrefix(path, scan.PrefixLength));
+            AppendLog($"Vorgetaeuschter Datei-Anfang entfernt: {scan.PrefixLength} Bytes "
+                      + $"vor dem {scan.Format}-Datenstrom.");
+        }
+        catch (Exception ex)
+        {
+            AppendLog("Der vorgetaeuschte Datei-Anfang konnte nicht entfernt werden: " + ex.Message);
+        }
     }
 
     private void HandleCurlLine(string line)
@@ -704,6 +749,7 @@ public sealed class MainForm : Form
         _chkResume.Enabled = !busy;
         _chkRetry.Enabled = !busy;
         _chkFail.Enabled = !busy;
+        _chkTrim.Enabled = !busy;
         UseWaitCursor = false;
     }
 
@@ -746,6 +792,7 @@ public sealed class MainForm : Form
         _settings.Resume = _chkResume.Checked;
         _settings.Retry = _chkRetry.Checked;
         _settings.FailOnHttpError = _chkFail.Checked;
+        _settings.TrimJunkPrefix = _chkTrim.Checked;
         _settings.Maximized = WindowState == FormWindowState.Maximized;
         if (WindowState == FormWindowState.Normal)
         {
